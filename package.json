@@ -1,0 +1,14 @@
+{
+  "name": "chord-node",
+  "version": "1.0.0",
+  "description": "Implementação didática do protocolo Chord para identificadores de 1 a 32",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chord · Criar nós</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">C</span><span>Chord <small>network manager</small></span></a>
+    <div class="connection"><span class="dot online"></span><span>Painel na porta 5000</span></div>
+  </header>
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Rede Chord</p>
+        <h1>Gerenciar nós</h1>
+        <p class="muted">Inicie nós nesta máquina ou conecte máquinas da mesma rede local.</p>
+      </div>
+    </section>
+
+    <section class="panel creator-panel">
+      <div>
+        <p class="eyebrow">Novo processo lógico</p>
+        <h2>Criar um nó Chord</h2>
+        <p class="muted">A porta 5000 é reservada para este painel. Use 5001, 5002, 5003… para os nós.</p>
+      </div>
+      <form id="create-form">
+        <div class="form-grid node-fields">
+          <label>ID do novo nó <input id="node-id" type="number" min="1" max="32" value="1" required></label>
+          <label>IP desta máquina <input id="node-host" type="text" value="127.0.0.1" required></label>
+          <label>Porta em que iniciará <input id="node-port" type="number" min="1" max="65535" value="5001" required></label>
+        </div>
+        <div class="join-mode">
+          <label><input type="radio" name="mode" value="create" checked> Criar um novo anel</label>
+          <label><input type="radio" name="mode" value="join"> Entrar por um nó existente</label>
+        </div>
+        <div id="target-fields" class="form-grid node-fields" hidden>
+          <label>ID do nó existente <input id="target-id" type="number" min="1" max="32" value="1"></label>
+          <label>IP do nó existente <input id="target-host" type="text" value="127.0.0.1"></label>
+          <label>Porta do nó existente <input id="target-port" type="number" min="1" max="65535" value="5001"></label>
+        </div>
+        <button id="create-button" class="button primary" type="submit">Criar e iniciar nó</button>
+        <p id="create-message" class="form-message" role="status"></p>
+      </form>
+    </section>
+
+    <section class="panel nodes-panel">
+      <div class="panel-heading">
+        <div><p class="eyebrow">Instâncias locais</p><h2>Nós em execução</h2></div>
+        <button id="refresh-button" class="button secondary" type="button">Atualizar</button>
+      </div>
+      <div id="nodes-list" class="nodes-list">
+        <p class="empty-row">Nenhum nó foi criado.</p>
+      </div>
+    </section>
+  </main>
+  <script src="/manager.js" defer></script>
+</body>
+</html>

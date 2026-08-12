@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Painel de monitoramento de um nó Chord">
+  <title>Chord · Painel do nó</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand-mark">C</span>
+      <span>Chord <small>node console</small></span>
+    </a>
+    <div class="connection">
+      <span id="connection-dot" class="dot"></span>
+      <span id="connection-label">Conectando…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Sistemas distribuídos · espaço de IDs 1–32</p>
+        <h1>Nó <span id="node-title">—</span></h1>
+        <p id="node-address" class="muted">Carregando endereço…</p>
+      </div>
+      <button id="refresh-button" class="button secondary" type="button">
+        Atualizar agora
+      </button>
+    </section>
+
+    <section class="stats" aria-label="Resumo do nó">
+      <article class="stat-card current">
+        <span class="stat-label">Nó atual</span>
+        <strong id="current-id">—</strong>
+        <span id="joined-label" class="pill">Aguardando</span>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Predecessor</span>
+        <strong id="predecessor-id">—</strong>
+        <span id="predecessor-address" class="stat-detail">Não definido</span>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Sucessor</span>
+        <strong id="successor-id">—</strong>
+        <span id="successor-address" class="stat-detail">Não definido</span>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">Finger entries</span>
+        <strong>5</strong>
+        <span class="stat-detail">m = log₂(32)</span>
+      </article>
+    </section>
+
+    <section id="join-panel" class="panel join-panel" hidden>
+      <div>
+        <p class="eyebrow">Configuração inicial</p>
+        <h2>Conectar este nó</h2>
+        <p class="muted">Crie um novo anel ou informe o IP e a porta de outro processo Chord já ativo.</p>
+      </div>
+      <form id="join-form">
+        <div class="join-mode">
+          <label><input type="radio" name="mode" value="create" checked> Criar novo anel</label>
+          <label><input type="radio" name="mode" value="existing"> Entrar em anel existente</label>
+        </div>
+        <div id="bootstrap-fields" class="form-grid" hidden>
+          <label>ID do nó de entrada <input id="bootstrap-id" type="number" min="1" max="32" value="1"></label>
+          <label>IP do nó existente <input id="bootstrap-host" type="text" value="127.0.0.1"></label>
+          <label>Porta do nó existente <input id="bootstrap-port" type="number" min="1" max="65535" value="5000"></label>
+        </div>
+        <button id="join-button" class="button primary" type="submit">Criar anel</button>
+        <p id="join-message" class="form-message" role="status"></p>
+      </form>
+    </section>
+
+    <div class="content-grid">
+      <section class="panel ring-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Topologia</p>
+            <h2>Anel de identificadores</h2>
+          </div>
+          <div class="legend">
+            <span><i class="legend-dot self"></i> Atual</span>
+            <span><i class="legend-dot route"></i> Rota</span>
+          </div>
+        </div>
+        <div id="ring" class="ring" aria-label="Anel Chord com 32 identificadores"></div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Roteamento</p>
+            <h2>Finger table</h2>
+          </div>
+          <span id="last-update" class="muted">—</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>i</th><th>Início</th><th>Sucessor</th><th>Endereço</th></tr>
+            </thead>
+            <tbody id="finger-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section id="files-panel" class="panel files-panel" hidden>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">Armazenamento distribuído</p>
+          <h2>Arquivos da rede</h2>
+          <p class="muted">Clique em um arquivo para buscá-lo no Chord e fazer o download.</p>
+        </div>
+        <button id="files-refresh-button" class="button secondary" type="button">Atualizar lista</button>
+      </div>
+
+      <form id="upload-form" class="upload-form">
+        <label class="file-picker">
+          <span>Escolher arquivo</span>
+          <input id="upload-file" type="file" required>
+        </label>
+        <span id="selected-file" class="muted">Nenhum arquivo selecionado</span>
+        <button id="upload-button" class="button primary" type="submit">Fazer upload</button>
+        <p id="upload-message" class="form-message" role="status"></p>
+      </form>
+
+      <div id="catalog-list" class="catalog-list" aria-live="polite">
+        <p class="empty-row">Carregando catálogo…</p>
+      </div>
+    </section>
+
+    <p id="global-error" class="global-error" role="alert" hidden></p>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
