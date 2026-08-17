@@ -8,7 +8,8 @@ const CATALOG_NAME = 'catalogo.txt';
 
 class ChordNode {
   constructor({ id, host = '127.0.0.1', port = 5000, requestTimeout = 10000,
-    storageDirectory } = {}) {
+    probeTimeout = 1500, stabilizeInterval = 2000, fixFingersInterval = 3000,
+    checkPredecessorInterval = 2500, storageDirectory } = {}) {
     this.id = validateId(id);
     this.host = String(host || '').trim();
     if (!this.host || this.host === '0.0.0.0' || this.host === '::') {
@@ -19,6 +20,12 @@ class ChordNode {
       throw new Error('A porta deve ser um inteiro entre 1 e 65535');
     }
     this.requestTimeout = requestTimeout;
+    // Timeout curto para as sondagens periódicas (stabilize, check-predecessor):
+    // não faz sentido esperar 10s por um nó que provavelmente caiu.
+    this.probeTimeout = probeTimeout;
+    this.stabilizeInterval = stabilizeInterval;
+    this.fixFingersInterval = fixFingersInterval;
+    this.checkPredecessorInterval = checkPredecessorInterval;
     this.storageDirectory = storageDirectory || path.join(
       process.cwd(), 'data', `node-${this.id}-${this.port}`);
     // Arquivos dos quais este nó é o dono (owner) ficam em primary/.
@@ -32,6 +39,9 @@ class ChordNode {
     // que serve para roteamento e pula distâncias maiores.
     this.successorList = [];
     this.joined = false;
+    this._timers = [];
+    this._maintenanceStarted = false;
+    this._stabilizing = false;
   }
 
   get reference() {
@@ -59,6 +69,7 @@ class ChordNode {
     for (const finger of this.fingers) finger.node = this.reference;
     this.successorList = []; // sozinho no anel, não há para quem replicar ainda
     this.joined = true;
+    this.startMaintenance();
   }
 
   async join(bootstrap) {
@@ -116,7 +127,191 @@ class ChordNode {
       method: 'POST',
       body: { originId: this.id, hops: 0 }
     });
+    this.startMaintenance();
     return this.state();
+  }
+
+  /**
+   * Inicia as três rotinas periódicas do Chord clássico. Sem elas, os
+   * ponteiros de predecessor/sucessor e a finger table só são calculados
+   * uma vez, no join, e nunca mais se corrigem sozinhos: quando um nó sai
+   * da rede sem avisar (o caso comum aqui, já que não há um "leave"), os
+   * vizinhos continuam apontando para um nó morto para sempre e o anel
+   * trava. stabilize + notify corrigem sucessor/predecessor, fixFingers
+   * corrige o roteamento e checkPredecessor detecta a saída de quem
+   * apontava para este nó.
+   */
+  startMaintenance() {
+    if (this._maintenanceStarted) return;
+    this._maintenanceStarted = true;
+    this._timers.push(setInterval(() => {
+      this.stabilize().catch((error) =>
+        console.error(`stabilize (nó ${this.id}): ${error.message}`));
+    }, this.stabilizeInterval));
+    this._timers.push(setInterval(() => {
+      this.fixFingers().catch((error) =>
+        console.error(`fix-fingers (nó ${this.id}): ${error.message}`));
+    }, this.fixFingersInterval));
+    this._timers.push(setInterval(() => {
+      this.checkPredecessor().catch((error) =>
+        console.error(`check-predecessor (nó ${this.id}): ${error.message}`));
+    }, this.checkPredecessorInterval));
+  }
+
+  stopMaintenance() {
+    for (const timer of this._timers) clearInterval(timer);
+    this._timers = [];
+    this._maintenanceStarted = false;
+  }
+
+  /**
+   * Verifica se o sucessor ainda é o nó correto e avisa esse sucessor de
+   * que este nó existe (notify), para que ele possa atualizar o próprio
+   * predecessor. Roda periodicamente; é o coração da auto-recuperação do
+   * anel.
+   */
+  async stabilize() {
+    if (!this.joined || this._stabilizing) return;
+    this._stabilizing = true;
+    try {
+      if (!this.successor || this.successor.id !== this.id) {
+        let predecessorOfSuccessor = null;
+        if (this.successor) {
+          try {
+            const result = await this.rpc(this.successor, '/rpc/predecessor',
+              { timeout: this.probeTimeout });
+            predecessorOfSuccessor = result.node;
+          } catch (error) {
+            // O sucessor não respondeu: provavelmente saiu da rede sem
+            // avisar. Usa a successor-list (mantida para replicação) para
+            // achar o próximo nó vivo, em vez de deixar o anel travado.
+            await this.repairSuccessor();
+          }
+        } else {
+          await this.repairSuccessor();
+        }
+
+        if (this.successor && this.successor.id !== this.id
+          && predecessorOfSuccessor && predecessorOfSuccessor.id !== this.id
+          && inInterval(predecessorOfSuccessor.id, this.id, this.successor.id, false, false)) {
+          this.successor = predecessorOfSuccessor;
+        }
+      }
+
+      if (this.successor && this.successor.id !== this.id) {
+        try {
+          await this.rpc(this.successor, '/rpc/notify', {
+            method: 'POST',
+            body: { node: this.reference },
+            timeout: this.probeTimeout
+          });
+        } catch (error) {
+          // Tenta de novo no próximo ciclo.
+        }
+      }
+
+      const previousSuccessorList = this.successorList;
+      await this.refreshSuccessorList();
+      await this.syncReplicationTargets(previousSuccessorList);
+    } finally {
+      this._stabilizing = false;
+    }
+  }
+
+  /**
+   * Substitui um sucessor que parou de responder pelo próximo nó vivo na
+   * successor-list atual (os até REPLICATION_FACTOR nós seguintes no
+   * anel). Se nenhum responder, este nó ficou isolado temporariamente e
+   * assume a si mesmo como sucessor, até que outro nó o encontre de novo
+   * pelas próprias finger tables e o notifique.
+   */
+  async repairSuccessor() {
+    for (const candidate of this.successorList) {
+      if (candidate.id === this.id) continue;
+      try {
+        await this.rpc(candidate, '/rpc/predecessor', { timeout: this.probeTimeout });
+        this.successor = candidate;
+        return;
+      } catch (error) {
+        continue; // tenta o próximo da successor-list
+      }
+    }
+    this.successor = this.reference;
+  }
+
+  /**
+   * Chamado por outro nó (via /rpc/notify) para se anunciar como possível
+   * novo predecessor. Só aceita se o predecessor atual está vazio, morto
+   * (será confirmado por checkPredecessor) ou se o candidato está de fato
+   * mais perto deste nó no anel.
+   */
+  notify(candidate) {
+    const node = normalizeReference(candidate);
+    if (node.id === this.id) return;
+    if (!this.predecessor || this.predecessor.id === this.id
+      || inInterval(node.id, this.predecessor.id, this.id, false, false)) {
+      this.predecessor = node;
+    }
+  }
+
+  /**
+   * Reconsulta cada entrada da finger table periodicamente, para que o
+   * roteamento se corrija sozinho quando um nó referenciado por uma
+   * finger sai da rede.
+   */
+  async fixFingers() {
+    if (!this.joined) return;
+    await this.refreshFingerTable();
+  }
+
+  /**
+   * Sonda o predecessor periodicamente. Se ele não responder, limpa o
+   * ponteiro (o próximo notify de outro nó o substitui) e promove as
+   * réplicas que este nó guardava para ele, já que este nó passa a ser o
+   * dono responsável por aquela faixa de ids.
+   */
+  async checkPredecessor() {
+    if (!this.joined || !this.predecessor || this.predecessor.id === this.id) return;
+    const failedId = this.predecessor.id;
+    try {
+      await this.rpc(this.predecessor, '/rpc/predecessor', { timeout: this.probeTimeout });
+    } catch (error) {
+      this.predecessor = null;
+      await this.promoteReplica(failedId).catch((promotionError) => {
+        console.error(`Não foi possível promover réplicas do nó ${failedId} no nó ${this.id}: ${promotionError.message}`);
+      });
+    }
+  }
+
+  /**
+   * Move para primary/ os arquivos que este nó guardava como réplica de
+   * um dono (ownerId) que saiu da rede sem avisar. Este nó só chama isso
+   * quando é ele mesmo quem detecta a queda do predecessor, ou seja,
+   * exatamente o nó que passa a ser responsável por aquela faixa de ids.
+   * Arquivos que já existirem em primary/ com o mesmo nome não são
+   * sobrescritos.
+   */
+  async promoteReplica(ownerId) {
+    const ownerDirectory = path.join(this.replicaDirectory, String(ownerId));
+    let files;
+    try {
+      files = await fs.readdir(ownerDirectory);
+    } catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    }
+    await fs.mkdir(this.primaryDirectory, { recursive: true });
+    for (const file of files) {
+      const from = path.join(ownerDirectory, file);
+      const to = path.join(this.primaryDirectory, file);
+      try {
+        await fs.access(to);
+        continue; // já existe um arquivo com esse nome; a cópia local prevalece
+      } catch {
+        await fs.rename(from, to);
+      }
+    }
+    await fs.rm(ownerDirectory, { recursive: true, force: true }).catch(() => {});
   }
 
   /**
@@ -254,10 +449,21 @@ class ChordNode {
     // caminhar pelo sucessor sempre encontra a posição correta no anel.
     if (next.id === this.id) next = this.successor;
 
-    return this.rpc(next, '/rpc/find-successor', {
-      method: 'POST',
-      body: { id, hops: hops + 1 }
-    });
+    try {
+      return await this.rpc(next, '/rpc/find-successor', {
+        method: 'POST',
+        body: { id, hops: hops + 1 }
+      });
+    } catch (error) {
+      if (next.id === this.successor.id) throw error; // já era o último recurso
+      // A finger usada apontava para um nó fora do ar (fixFingers ainda não
+      // teve tempo de corrigir essa entrada). Tenta pelo sucessor direto
+      // antes de desistir, em vez de derrubar a busca inteira.
+      return this.rpc(this.successor, '/rpc/find-successor', {
+        method: 'POST',
+        body: { id, hops: hops + 1 }
+      });
+    }
   }
 
   closestPrecedingFinger(id) {
@@ -431,10 +637,10 @@ class ChordNode {
     if (!this.joined) throw new Error('O nó ainda não entrou em uma rede');
   }
 
-  async rpc(node, path, { method = 'GET', body } = {}) {
+  async rpc(node, path, { method = 'GET', body, timeout } = {}) {
     const target = normalizeReference(node);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.requestTimeout);
+    const timer = setTimeout(() => controller.abort(), timeout || this.requestTimeout);
     try {
       const response = await fetch(`http://${target.host}:${target.port}${path}`, {
         method,

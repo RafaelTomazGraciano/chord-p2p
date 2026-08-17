@@ -26,8 +26,11 @@ async function startNodeServer(options) {
   return {
     node,
     server,
-    close: () => new Promise((resolve, reject) =>
-      server.close((error) => error ? reject(error) : resolve()))
+    close: () => {
+      node.stopMaintenance();
+      return new Promise((resolve, reject) =>
+        server.close((error) => error ? reject(error) : resolve()));
+    }
   };
 }
 
@@ -76,6 +79,11 @@ async function handleNodeRequest(node, request, response) {
     }
     if (request.method === 'PUT' && url.pathname === '/rpc/successor') {
       node.successor = normalizeReference((await readJson(request)).node);
+      return json(response, 200, { ok: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/rpc/notify') {
+      const body = await readJson(request);
+      node.notify(body.node);
       return json(response, 200, { ok: true });
     }
     if (request.method === 'GET' && url.pathname === '/rpc/successor') {
