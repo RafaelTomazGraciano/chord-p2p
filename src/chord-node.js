@@ -92,8 +92,14 @@ class ChordNode {
     const predecessorResult = await this.rpc(successor, '/rpc/predecessor');
     const predecessor = predecessorResult.node || successor;
 
-    this.successor = successor;
-    this.predecessor = predecessor;
+    // Guarda apenas id/host/port. A resposta de find-successor vem
+    // decorada com "replicas" (dica para leitura via réplica); se isso
+    // fosse gravado direto em this.successor, cada ciclo de stabilize
+    // reembrulharia o valor anterior dentro de um novo "replicas",
+    // crescendo sem limite até o /api/state não conseguir mais ser
+    // serializado (era a causa do ERR_HTTP_HEADERS_SENT no painel).
+    this.successor = normalizeReference(successor);
+    this.predecessor = normalizeReference(predecessor);
 
     // Pede ao sucessor os arquivos que passam a pertencer a este nó (aqueles
     // cujo hash cai no intervalo (predecessor, this.id]). Precisa acontecer
@@ -200,7 +206,7 @@ class ChordNode {
         if (this.successor && this.successor.id !== this.id
           && predecessorOfSuccessor && predecessorOfSuccessor.id !== this.id
           && inInterval(predecessorOfSuccessor.id, this.id, this.successor.id, false, false)) {
-          this.successor = predecessorOfSuccessor;
+          this.successor = normalizeReference(predecessorOfSuccessor);
         }
       }
 
@@ -236,7 +242,7 @@ class ChordNode {
       if (candidate.id === this.id) continue;
       try {
         await this.rpc(candidate, '/rpc/predecessor', { timeout: this.probeTimeout });
-        this.successor = candidate;
+        this.successor = normalizeReference(candidate);
         return;
       } catch (error) {
         continue; // tenta o próximo da successor-list
@@ -395,7 +401,7 @@ class ChordNode {
       return list;
     }
 
-    let current = this.successor;
+    let current = normalizeReference(this.successor);
     list.push(current);
 
     while (list.length < REPLICATION_FACTOR && current.id !== this.id) {
@@ -408,7 +414,7 @@ class ChordNode {
         // degradado, não incorreto).
         break;
       }
-      const next = response.node;
+      const next = response.node && normalizeReference(response.node);
       if (!next || next.id === this.id) break; // completou a volta no anel
       list.push(next);
       current = next;
@@ -473,7 +479,10 @@ class ChordNode {
     const nodes = await Promise.all(this.fingers.map((finger) =>
       this.findSuccessor(finger.start)));
     this.fingers.forEach((finger, index) => {
-      finger.node = nodes[index];
+      // this.findSuccessor devolve o nó decorado com "replicas" (dica de
+      // leitura); guardar isso na finger table faria o campo crescer a
+      // cada ciclo de fixFingers, então só o essencial (id/host/port) fica.
+      finger.node = normalizeReference(nodes[index]);
     });
   }
 

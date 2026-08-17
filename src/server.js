@@ -101,8 +101,20 @@ function isLoopback(host) {
 }
 
 function json(response, status, value) {
+  if (response.headersSent) return; // resposta já foi enviada; nada a fazer
+  let payload;
+  try {
+    payload = JSON.stringify(value, null, 2);
+  } catch (error) {
+    // Nunca deve acontecer depois da correção nos ponteiros do anel, mas se
+    // acontecer de novo por outro motivo, isso vira um 500 tratado em vez
+    // de derrubar o processo inteiro (era a causa do ERR_HTTP_HEADERS_SENT).
+    console.error(`Falha ao serializar resposta JSON: ${error.message}`);
+    response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+    return response.end(JSON.stringify({ error: 'Falha ao serializar a resposta' }));
+  }
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
-  response.end(JSON.stringify(value, null, 2));
+  response.end(payload);
 }
 
 async function sendFile(response, file, contentType) {

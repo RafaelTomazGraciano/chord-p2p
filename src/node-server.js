@@ -137,8 +137,17 @@ async function handleNodeRequest(node, request, response) {
 }
 
 function json(response, status, value) {
+  if (response.headersSent) return; // resposta já foi enviada; nada a fazer
+  let payload;
+  try {
+    payload = JSON.stringify(value, null, 2);
+  } catch (error) {
+    console.error(`Falha ao serializar resposta JSON: ${error.message}`);
+    response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+    return response.end(JSON.stringify({ error: 'Falha ao serializar a resposta' }));
+  }
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
-  response.end(JSON.stringify(value, null, 2));
+  response.end(payload);
 }
 
 async function sendFile(response, file, contentType) {
