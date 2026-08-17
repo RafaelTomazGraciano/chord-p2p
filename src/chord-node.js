@@ -95,6 +95,12 @@ class ChordNode {
     this.successor = successor;
     this.predecessor = predecessor;
 
+    // Pede ao sucessor os arquivos que passam a pertencer a este nó (aqueles
+    // cujo hash cai no intervalo (predecessor, this.id]). Precisa acontecer
+    // antes de atualizar os ponteiros do anel, enquanto o sucessor ainda é
+    // formalmente o dono desses arquivos.
+    await this.takeOverKeys(predecessor.id, successor);
+
     // Faz o novo nó entrar entre predecessor e sucessor.
     await this.rpc(successor, '/rpc/predecessor', {
       method: 'PUT',
@@ -312,6 +318,68 @@ class ChordNode {
       }
     }
     await fs.rm(ownerDirectory, { recursive: true, force: true }).catch(() => {});
+  }
+
+  /**
+   * Chamado pelo nó recém-chegado logo depois de descobrir seu predecessor
+   * e sucessor. Sem isso, a posse de um arquivo muda de dono no roteamento
+   * assim que alguém entra no anel (porque findSuccessor passa a apontar
+   * para o novo nó), mas os bytes continuam só no disco do dono antigo.
+   * É exatamente por isso que o catálogo parecia "resetar": o novo dono
+   * não tinha nenhuma cópia local e recomeçava um catálogo vazio.
+   */
+  async takeOverKeys(predecessorId, successorNode) {
+    if (successorNode.id === this.id) return; // sozinho no anel, nada a transferir
+    let response;
+    try {
+      response = await this.rpc(successorNode, '/rpc/transfer-keys', {
+        method: 'POST',
+        body: { newNodeId: this.id, predecessorId }
+      });
+    } catch (error) {
+      console.error(`Não foi possível transferir arquivos do nó ${successorNode.id}: ${error.message}`);
+      return;
+    }
+    for (const file of response.files || []) {
+      const content = Buffer.from(file.content, 'base64');
+      await this.storeLocal(file.name, content);
+    }
+  }
+
+  /**
+   * Atende ao pedido de um nó que acabou de entrar entre `predecessorId` e
+   * `newNodeId`: devolve e remove localmente os arquivos deste nó cujo
+   * hash caiu nesse intervalo, já que a posse deles muda de dono.
+   */
+  async transferKeys(newNodeId, predecessorId) {
+    const files = await this.listPrimaryFiles();
+    const transferred = [];
+    for (const name of files) {
+      const hashId = hashKey(name);
+      if (inInterval(hashId, predecessorId, newNodeId, false, true)) {
+        const content = await this.readLocal(name);
+        transferred.push({ name, content: content.toString('base64') });
+      }
+    }
+
+    for (const file of transferred) {
+      await fs.unlink(path.join(this.primaryDirectory, file.name)).catch(() => {});
+    }
+
+    // As réplicas antigas desses arquivos, guardadas pela successor-list
+    // deste nó, ficaram órfãs: o novo dono monta as próprias ao longo da
+    // sua própria successor-list. Apaga aqui para não deixar cópias
+    // divergentes espalhadas pela rede.
+    if (transferred.length > 0) {
+      await Promise.all(this.successorList.map((node) =>
+        Promise.all(transferred.map((file) =>
+          this.rpc(node, '/rpc/replicate', {
+            method: 'DELETE',
+            body: { ownerId: this.id, name: file.name }
+          }).catch(() => {})))));
+    }
+
+    return { files: transferred };
   }
 
   /**

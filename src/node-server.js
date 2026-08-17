@@ -94,6 +94,10 @@ async function handleNodeRequest(node, request, response) {
       return json(response, 200,
         await node.refreshRingFingerTables(body.originId, body.hops || 0));
     }
+    if (request.method === 'POST' && url.pathname === '/rpc/transfer-keys') {
+      const body = await readJson(request);
+      return json(response, 200, await node.transferKeys(body.newNodeId, body.predecessorId));
+    }
     if (request.method === 'PUT' && url.pathname === '/rpc/files') {
       const body = await readJson(request);
       const content = Buffer.from(body.content || '', 'base64');
