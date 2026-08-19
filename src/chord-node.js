@@ -42,6 +42,10 @@ class ChordNode {
     this._timers = [];
     this._maintenanceStarted = false;
     this._stabilizing = false;
+    // true quando repairSuccessor esgota successor-list, fingers e
+    // predecessor sem achar ninguém vivo. Só serve de diagnóstico/log por
+    // enquanto; não muda nenhum comportamento de leitura/escrita.
+    this.isolated = false;
   }
 
   get reference() {
@@ -231,24 +235,83 @@ class ChordNode {
   }
 
   /**
-   * Substitui um sucessor que parou de responder pelo próximo nó vivo na
-   * successor-list atual (os até REPLICATION_FACTOR nós seguintes no
-   * anel). Se nenhum responder, este nó ficou isolado temporariamente e
-   * assume a si mesmo como sucessor, até que outro nó o encontre de novo
-   * pelas próprias finger tables e o notifique.
+   * Substitui um sucessor que parou de responder. Tenta, nessa ordem: os
+   * candidatos da successor-list (vizinhos próximos), os candidatos ainda
+   * guardados na finger table (alcançam mais longe no anel, então têm
+   * mais chance de sobreviver a uma morte concentrada numa vizinhança de
+   * ids, como vários nós caindo juntos na mesma máquina) e, por fim, o
+   * sucessor do predecessor conhecido (que pode ter seu próprio caminho de
+   * volta ao resto da rede).
+   *
+   * Se nada disso responder, o nó fica marcado como "isolated" mas NÃO
+   * assume a si mesmo como sucessor. Isso é proposital: se dois nós forem
+   * isolados ao mesmo tempo (ex.: a "ponte" entre eles morreu inteira de
+   * uma vez), os dois assumirem a si mesmos faria a rede se dividir em
+   * duas ilhas para sempre, cada uma se achando dona do anel inteiro. Em
+   * vez disso, o nó fica "travado com segurança": recusa operações que
+   * dependeriam do sucessor até achar alguém de verdade, e continua
+   * tentando os mesmos candidatos (e quaisquer outros que voltem a
+   * responder) a cada ciclo.
    */
   async repairSuccessor() {
     for (const candidate of this.successorList) {
       if (candidate.id === this.id) continue;
-      try {
-        await this.rpc(candidate, '/rpc/predecessor', { timeout: this.probeTimeout });
+      if (await this.isAlive(candidate)) {
         this.successor = normalizeReference(candidate);
-        return;
-      } catch (error) {
-        continue; // tenta o próximo da successor-list
+        this.isolated = false;
+        return true;
       }
     }
-    this.successor = this.reference;
+
+    for (const candidate of this.uniqueFingerCandidates()) {
+      if (await this.isAlive(candidate)) {
+        this.successor = normalizeReference(candidate);
+        this.isolated = false;
+        return true;
+      }
+    }
+
+    if (this.predecessor && this.predecessor.id !== this.id) {
+      try {
+        const result = await this.rpc(this.predecessor, '/rpc/successor', { timeout: this.probeTimeout });
+        if (result.node && result.node.id !== this.id && await this.isAlive(result.node)) {
+          this.successor = normalizeReference(result.node);
+          this.isolated = false;
+          return true;
+        }
+      } catch (error) {
+        // predecessor também não respondeu; segue para o estado isolado
+      }
+    }
+
+    if (!this.isolated) {
+      this.isolated = true;
+      console.error(`Nó ${this.id} não encontrou nenhum sucessor vivo (successor-list, fingers e predecessor esgotados). Mantendo os últimos ponteiros conhecidos e tentando de novo nos próximos ciclos.`);
+    }
+    return false;
+  }
+
+  /** Sonda rapidamente se um nó ainda responde, sem lançar exceção. */
+  async isAlive(node) {
+    try {
+      await this.rpc(node, '/rpc/predecessor', { timeout: this.probeTimeout });
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /** Nós distintos ainda presentes na finger table, excluindo a si mesmo. */
+  uniqueFingerCandidates() {
+    const seen = new Set();
+    const candidates = [];
+    for (const finger of this.fingers) {
+      const node = finger.node;
+      if (!node || node.id === this.id || seen.has(node.id)) continue;
+      seen.add(node.id);
+      candidates.push(node);
+    }
+    return candidates;
   }
 
   /**
@@ -451,21 +514,35 @@ class ChordNode {
 
     let current = normalizeReference(this.successor);
     list.push(current);
+    let walkFailed = false;
 
     while (list.length < REPLICATION_FACTOR && current.id !== this.id) {
       let response;
       try {
-        response = await this.rpc(current, '/rpc/successor');
+        response = await this.rpc(current, '/rpc/successor', { timeout: this.probeTimeout });
       } catch (error) {
-        // Nó inacessível: para por aqui. A lista fica mais curta até a
-        // próxima estabilização, o que é aceitável (comportamento
-        // degradado, não incorreto).
+        // Nó inacessível: a caminhada para por aqui, mas isso não deveria
+        // apagar quem já sabíamos que estava mais à frente na lista.
+        walkFailed = true;
         break;
       }
       const next = response.node && normalizeReference(response.node);
       if (!next || next.id === this.id) break; // completou a volta no anel
       list.push(next);
       current = next;
+    }
+
+    if (walkFailed) {
+      // Completa com o que sobrar da lista anterior: ainda podem estar
+      // vivos (só o nó do meio da cadeia que não respondeu agora), e vão
+      // ser testados de novo no próximo ciclo por repairSuccessor.
+      const knownIds = new Set(list.map((node) => node.id));
+      for (const previous of this.successorList) {
+        if (list.length >= REPLICATION_FACTOR) break;
+        if (previous.id === this.id || knownIds.has(previous.id)) continue;
+        list.push(previous);
+        knownIds.add(previous.id);
+      }
     }
 
     this.successorList = list;
@@ -524,13 +601,22 @@ class ChordNode {
   }
 
   async refreshFingerTable() {
-    const nodes = await Promise.all(this.fingers.map((finger) =>
+    // allSettled em vez de all: uma finger que falha em resolver agora
+    // (ex.: sucessor temporariamente inalcançável) não deve impedir as
+    // outras de se atualizarem, nem apagar o valor anterior dessa
+    // entrada, que continua sendo um candidato útil para repairSuccessor.
+    const results = await Promise.allSettled(this.fingers.map((finger) =>
       this.findSuccessor(finger.start)));
     this.fingers.forEach((finger, index) => {
-      // this.findSuccessor devolve o nó decorado com "replicas" (dica de
-      // leitura); guardar isso na finger table faria o campo crescer a
-      // cada ciclo de fixFingers, então só o essencial (id/host/port) fica.
-      finger.node = normalizeReference(nodes[index]);
+      const result = results[index];
+      if (result.status === 'fulfilled') {
+        // this.findSuccessor devolve o nó decorado com "replicas" (dica de
+        // leitura); guardar isso na finger table faria o campo crescer a
+        // cada ciclo de fixFingers, então só o essencial (id/host/port) fica.
+        finger.node = normalizeReference(result.value);
+      }
+      // se falhou, mantém finger.node como estava: continua sendo um
+      // candidato de reconexão para repairSuccessor tentar depois.
     });
   }
 
