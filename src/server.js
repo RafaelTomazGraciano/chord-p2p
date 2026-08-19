@@ -39,6 +39,23 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/nodes') {
       return json(response, 200, Array.from(nodes.values(), ({ node }) => node.state()));
     }
+    const nodeMatch = url.pathname.match(/^\/api\/nodes\/(\d+)$/);
+    if (request.method === 'DELETE' && nodeMatch) {
+      const port = Number(nodeMatch[1]);
+      const running = nodes.get(port);
+      if (!running) throw new Error(`Não existe nó local na porta ${port}`);
+      try {
+        await running.node.leave();
+      } catch (error) {
+        // Se o "leave" gracioso falhar (ex.: rede instável), ainda assim
+        // fecha o processo deste nó; os outros nós detectam a queda
+        // sozinhos via checkPredecessor/stabilize.
+        console.error(`Nó da porta ${port} não conseguiu sair graciosamente: ${error.message}`);
+      }
+      await running.close();
+      nodes.delete(port);
+      return json(response, 200, { ok: true });
+    }
     if (request.method === 'GET' && url.pathname === '/api/network') {
       const addresses = localIPv4Addresses();
       const requestedHost = request.headers.host?.replace(/:\d+$/, '');

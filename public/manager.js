@@ -49,13 +49,37 @@ async function loadNodes() {
           <span>${nodeAddress(state.node)}</span>
         </div>
         <div class="node-links"><span>← ${predecessor}</span><span>${successor} →</span></div>
-        <a class="button secondary" href="http://${nodeAddress(state.node)}">Abrir painel</a>`;
+        <a class="button secondary" href="http://${nodeAddress(state.node)}">Abrir painel</a>
+        <button class="button danger" type="button" data-remove-port="${state.node.port}">Remover</button>`;
       return card;
     }));
   } catch (error) {
     list.innerHTML = `<p class="global-error">Erro ao consultar os nós: ${error.message}</p>`;
   }
 }
+
+async function removeNode(port, button) {
+  if (!confirm(`Remover o nó da porta ${port}? Os arquivos dele são entregues ao sucessor antes de sair.`)) return;
+  button.disabled = true;
+  button.textContent = 'Removendo…';
+  try {
+    const response = await fetch(`/api/nodes/${port}`, { method: 'DELETE' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Não foi possível remover o nó');
+    await loadNodes();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Remover';
+    message.className = 'form-message error';
+    message.textContent = error.message;
+  }
+}
+
+list.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-remove-port]');
+  if (!button) return;
+  removeNode(Number(button.dataset.removePort), button);
+});
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();

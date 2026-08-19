@@ -327,6 +327,54 @@ class ChordNode {
   }
 
   /**
+   * Saída graciosa da rede, ao contrário de simplesmente derrubar o
+   * processo. Entrega ao sucessor os arquivos dos quais este nó era dono
+   * (ele passa a ser o novo dono, exatamente como aconteceria depois de
+   * uma queda detectada por checkPredecessor, só que sem esperar nenhum
+   * ciclo de estabilização) e liga predecessor e sucessor um ao outro
+   * diretamente, pulando este nó. Depois disso o nó volta ao estado
+   * "fora do anel" e pode entrar de novo (join) se quiser.
+   */
+  async leave() {
+    this.assertJoined();
+    this.stopMaintenance();
+
+    if (this.successor && this.successor.id !== this.id) {
+      const files = await this.listPrimaryFiles();
+      for (const name of files) {
+        try {
+          const content = await this.readLocal(name);
+          await this.rpc(this.successor, '/rpc/files', {
+            method: 'PUT',
+            body: { name, content: content.toString('base64') }
+          });
+        } catch (error) {
+          console.error(`Não foi possível entregar "${name}" ao sucessor ao sair: ${error.message}`);
+        }
+      }
+
+      if (this.predecessor && this.predecessor.id !== this.id) {
+        await this.rpc(this.successor, '/rpc/predecessor', {
+          method: 'PUT', body: { node: this.predecessor }
+        }).catch(() => {});
+        await this.rpc(this.predecessor, '/rpc/successor', {
+          method: 'PUT', body: { node: this.successor }
+        }).catch(() => {});
+        // Reforça via notify, para o stabilize do sucessor confirmar o novo predecessor.
+        await this.rpc(this.successor, '/rpc/notify', {
+          method: 'POST', body: { node: this.predecessor }
+        }).catch(() => {});
+      }
+    }
+
+    this.joined = false;
+    this.predecessor = null;
+    this.fingers = this.buildEmptyFingerTable();
+    this.successorList = [];
+    return this.state();
+  }
+
+  /**
    * Chamado pelo nó recém-chegado logo depois de descobrir seu predecessor
    * e sucessor. Sem isso, a posse de um arquivo muda de dono no roteamento
    * assim que alguém entra no anel (porque findSuccessor passa a apontar

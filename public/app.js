@@ -21,6 +21,7 @@ const elements = {
   bootstrapFields: document.querySelector('#bootstrap-fields'),
   globalError: document.querySelector('#global-error'),
   refreshButton: document.querySelector('#refresh-button'),
+  leaveButton: document.querySelector('#leave-button'),
   filesPanel: document.querySelector('#files-panel'),
   filesRefreshButton: document.querySelector('#files-refresh-button'),
   catalogList: document.querySelector('#catalog-list'),
@@ -93,6 +94,7 @@ function render(state) {
   elements.joinedLabel.textContent = state.joined ? 'No anel' : 'Fora do anel';
   elements.joinedLabel.classList.toggle('active', state.joined);
   elements.joinPanel.hidden = state.joined;
+  elements.leaveButton.hidden = !state.joined;
   elements.filesPanel.hidden = !state.joined;
   renderNode(elements.predecessorId, elements.predecessorAddress, state.predecessor);
   renderNode(elements.successorId, elements.successorAddress, state.successor);
@@ -220,6 +222,21 @@ elements.joinForm.addEventListener('submit', async (event) => {
 });
 
 elements.refreshButton.addEventListener('click', refresh);
+elements.leaveButton.addEventListener('click', async () => {
+  if (!confirm('Sair da rede? Os arquivos deste nó são entregues ao sucessor antes de sair.')) return;
+  elements.leaveButton.disabled = true;
+  try {
+    const response = await fetch('/leave', { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Não foi possível sair da rede');
+    render(result);
+  } catch (error) {
+    elements.globalError.textContent = `Não foi possível sair da rede: ${error.message}`;
+    elements.globalError.hidden = false;
+  } finally {
+    elements.leaveButton.disabled = false;
+  }
+});
 elements.filesRefreshButton.addEventListener('click', refreshCatalog);
 elements.uploadFile.addEventListener('change', () => {
   elements.selectedFile.textContent = elements.uploadFile.files[0]?.name

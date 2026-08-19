@@ -66,6 +66,9 @@ async function handleNodeRequest(node, request, response) {
       const { bootstrap = null } = await readJson(request);
       return json(response, 200, await node.join(bootstrap));
     }
+    if (request.method === 'POST' && url.pathname === '/leave') {
+      return json(response, 200, await node.leave());
+    }
     if (request.method === 'POST' && url.pathname === '/rpc/find-successor') {
       const body = await readJson(request);
       return json(response, 200, await node.findSuccessor(body.id, body.hops || 0));
